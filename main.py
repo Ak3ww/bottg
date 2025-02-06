@@ -8,7 +8,7 @@ from io import BytesIO
 from typing import Optional
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from tweepy.asynchronous import AsyncClient
+from tweepy import Client  # Use synchronous Tweepy Client
 from telegram import Update, InputMediaPhoto, InputMediaVideo, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
@@ -37,18 +37,19 @@ MAX_FORWARDED_TWEETS_TO_TRACK = 5  # Number of forwarded tweets to track
 WATCH_MODE_ENABLED = False
 
 # ✅ Twitter API Client
-async def get_twitter_api():
+def get_twitter_api():
     global _twitter_api_client
     if _twitter_api_client:
         return _twitter_api_client
 
     try:
-        client = AsyncClient(
+        client = Client(
             bearer_token=os.getenv("TWITTER_BEARER_TOKEN"),
             consumer_key=os.getenv("TWITTER_CONSUMER_KEY"),
             consumer_secret=os.getenv("TWITTER_CONSUMER_SECRET"),
             access_token=os.getenv("TWITTER_ACCESS_TOKEN"),
             access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET"),
+            wait_on_rate_limit=True  # Automatically handle rate limits
         )
         logger.info("✅ Twitter API Connected")
         _twitter_api_client = client
