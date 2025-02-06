@@ -164,20 +164,28 @@ async def fetch_and_forward_tweets(context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(POLL_INTERVAL)  # Sleep for 20 minutes before checking again
 
 # ✅ Main Function
-async def main():
+async def start_bot():
     logger.info("🚀 Bot started.")
     application = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("fwd_list", fwd_list_command))
     application.add_handler(CommandHandler("watchmode", watch_mode_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_tweet_url))
 
     if await initialize_twitter_user_id():
         asyncio.create_task(fetch_and_forward_tweets(application.bot))
 
+    bot_commands = [
+        BotCommand("start", "Manually forward a tweet"),
+        BotCommand("fwd_list", "List latest forwarded tweets"),
+        BotCommand("watchmode", "Toggle watch mode"),
+    ]
+    await application.bot.set_my_commands(bot_commands)
+
     async with application:
         await application.start()
         await application.updater.start_polling()
+        asyncio.create_task(process_tweet_queue())
         await asyncio.Event().wait()
 
-if __name__ == "__main__":
-    asyncio.run(main())
