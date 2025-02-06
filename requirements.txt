@@ -1,3 +1,4 @@
+streamlit
 tweepy
 python-telegram-bot
 aiohttp
