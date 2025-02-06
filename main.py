@@ -144,15 +144,35 @@ async def send_tweet_to_telegram(tweet, context: ContextTypes.DEFAULT_TYPE):
     if media_group:
         await context.bot.send_media_group(chat_id=TELEGRAM_CHANNEL_ID, media=media_group)
 
+# ✅ Define /start Command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a welcome message when the bot starts."""
+    start_message = """
+    📌 Welcome! This bot forwards Tweets from X to a Telegram channel.
+
+    ➡️ Simply send me a valid tweet URL, and I will forward the text with media to the channel.
+
+    ⚠️ Rate limits from the Twitter API might cause delays.
+    """
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=start_message)
+
+
 # ✅ Start Bot Function
 async def start_bot():
-    logger.info("🚀 Bot started.")
+    """Starts the Telegram bot and initializes handlers."""
+    logger.info("🚀 Bot is starting...")
+
     application = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
 
+    # ✅ Ensure all handlers are properly added
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("watchmode", watch_mode_command))  
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_tweet_url))
 
+    # ✅ Start the bot
     async with application:
+        await application.initialize()
         await application.start()
         await application.updater.start_polling()
-        await asyncio.Event().wait()
+        logger.info("✅ Bot is running!")
+        await asyncio.Event().wait()  # Keeps the bot running
