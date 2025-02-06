@@ -163,6 +163,22 @@ async def fetch_and_forward_tweets(context: ContextTypes.DEFAULT_TYPE):
 
         await asyncio.sleep(POLL_INTERVAL)  # Sleep for 20 minutes before checking again
 
+
+# Forward List
+async def fwd_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a list of forwarded tweets to the user."""
+    if not FORWARDED_TWEETS:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="No tweets have been forwarded yet.")
+        return
+
+    message_text = "Here are the latest forwarded Tweets:\n\n"
+    for tweet_info in FORWARDED_TWEETS:
+        message_text += f"Tweet ID: {tweet_info['tweet_id']}\n"
+        message_text += f"Telegram Link: https://t.me/{str(TELEGRAM_CHANNEL_ID).replace('-100', '')}/{tweet_info['message_id']}\n\n"
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=message_text, disable_web_page_preview=True)
+
+
 # ✅ Main Function
 async def start_bot():
     logger.info("🚀 Bot started.")
