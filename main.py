@@ -157,6 +157,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text=start_message)
 
 
+# ✅ Toggle Watch Mode
+async def watch_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggles watch mode and starts/stops the auto-fetching process."""
+    global WATCH_MODE_ENABLED
+    WATCH_MODE_ENABLED = not WATCH_MODE_ENABLED
+    status = "enabled" if WATCH_MODE_ENABLED else "disabled"
+
+    logger.info(f"🔄 Watch mode is now {status}")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🔄 Watch mode is now {status}.")
+    
+    if WATCH_MODE_ENABLED:
+        asyncio.create_task(fetch_and_forward_tweets(context))  # ✅ Starts watching for tweets
+
+
+
 # ✅ Start Bot Function
 async def start_bot():
     """Starts the Telegram bot and initializes handlers."""
@@ -166,7 +181,7 @@ async def start_bot():
 
     # ✅ Ensure all handlers are properly added
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("watchmode", watch_mode_command))  
+    application.add_handler(CommandHandler("watchmode", watch_mode_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_tweet_url))
 
     # ✅ Start the bot
