@@ -1,193 +1,205 @@
 import os
 import logging
+import json
 import re
 import tweepy
 import asyncio
-import aiohttp
-from io import BytesIO
-from typing import Optional
-from datetime import datetime
 from dotenv import load_dotenv
-from tweepy import Client  # Use synchronous Tweepy Client
-from telegram import Update, InputMediaPhoto, InputMediaVideo, BotCommand
+from tweepy.asynchronous import AsyncClient
+from telegram import Update, InputMediaPhoto
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode
-import json
 
+# ✅ Load environment variables
 load_dotenv()
 
 # ✅ Configure Logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ✅ Twitter Regex
+TWITTER_URL_REGEX = re.compile(r"https://(?:www\.)?(?:twitter|x)\.com/\w+/status/(\d+)")
+
 # ✅ Global Variables
 _twitter_api_client = None
-tweet_queue = asyncio.Queue(maxsize=5)
 twitter_username = os.getenv("TWITTER_USERNAME_TO_MONITOR")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
-MAX_RETRIES = 3
-BASE_DELAY = 15  # Base delay in seconds
-POLL_INTERVAL = 1200  # Check every 20 minutes
-USER_ID_CACHE_FILE = "user_id_cache.json"
-FORWARDED_TWEETS = []
-MAX_FORWARDED_TWEETS_TO_TRACK = 5
+POLL_INTERVAL = 1200  # 20 minutes
 WATCH_MODE_ENABLED = False
+twitter_user_id = None
+watchmode_chat_id = None
+
+# ✅ Read Twitter User ID from JSON File
+def get_twitter_user_id():
+    try:
+        with open("user_id.json", "r") as file:
+            data = json.load(file)
+            return data.get("user_id")
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logger.error(f"❌ ERROR: Failed to read user_id.json: {e}")
+        return None
 
 # ✅ Twitter API Client
-def get_twitter_api():
+async def get_twitter_api():
     global _twitter_api_client
     if _twitter_api_client:
         return _twitter_api_client
 
     try:
-        client = Client(
+        client = AsyncClient(
             bearer_token=os.getenv("TWITTER_BEARER_TOKEN"),
             consumer_key=os.getenv("TWITTER_CONSUMER_KEY"),
             consumer_secret=os.getenv("TWITTER_CONSUMER_SECRET"),
             access_token=os.getenv("TWITTER_ACCESS_TOKEN"),
             access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET"),
-            wait_on_rate_limit=True
         )
         logger.info("✅ Twitter API Connected")
         _twitter_api_client = client
         return _twitter_api_client
-
     except tweepy.TweepyException as e:
         logger.error(f"❌ Twitter API Error: {e}")
         return None
 
-# ✅ Fetch Latest Tweet (Ignoring Replies & Retweets)
-def get_latest_tweet():
-    """Fetch the latest tweet from the monitored account, ignoring replies and retweets."""
-    api = get_twitter_api()
+# ✅ Initialize Twitter User ID
+async def initialize_twitter():
+    global twitter_user_id
+    api = await get_twitter_api()
     if not api:
-        logger.error("❌ Twitter API could not be initialized.")
-        return None
+        logger.error("❌ ERROR: Twitter API could not be initialized.")
+        return False
 
-    try:
-        logger.info(f"🔍 Fetching latest tweets from @{twitter_username}...")
-        tweets = api.get_users_tweets(
-            id=twitter_username,
-            tweet_fields=["created_at", "text", "referenced_tweets"],
-            expansions=["attachments.media_keys"],
-            media_fields=["url", "type", "variants"],
-            max_results=5  # Fetch last 5 tweets
-        )
+    twitter_user_id = get_twitter_user_id()
+    if not twitter_user_id:
+        logger.error("❌ ERROR: Twitter User ID could not be loaded from user_id.json.")
+        return False
 
-        if tweets and tweets.data:
-            for tweet in tweets.data:
-                if "referenced_tweets" not in tweet:  # Ignore replies & retweets
-                    return tweet
-        logger.info("⚠️ No valid new tweets found.")
-        return None
+    logger.info(f"✅ Twitter User ID Loaded: {twitter_user_id}")
+    return True
 
-    except tweepy.TweepyException as e:
-        logger.error(f"❌ Error fetching tweets: {e}")
-        return None
+# ✅ Start Command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    start_message = "📌 Send me a valid tweet URL, and I will forward it to the channel."
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=start_message)
+    logger.info(f"📢 [LOG] /start command used by {update.effective_user.id}")
+
+# ✅ Extract Media from Tweet
+def extract_media(tweet):
+    """Extracts media URLs from a tweet."""
+    media_urls = []
+    
+    if not tweet.includes or "media" not in tweet.includes:
+        return media_urls  # No media found
+
+    for media in tweet.includes["media"]:
+        if media["type"] == "photo":
+            media_urls.append(media["url"])
+    
+    return media_urls
 
 # ✅ Process Tweet URL
 async def process_tweet_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes a tweet URL, adding it to the queue if valid."""
-    match = re.search(r"https://(?:www\.)?(?:twitter|x)\.com/\w+/status/(\d+)", update.message.text)
+    """Handles tweet URLs sent by users"""
+    chat_id = update.effective_chat.id
+    message = update.message.text
+    match = TWITTER_URL_REGEX.search(message)
+
     if match:
         tweet_id = match.group(1)
-        logger.info(f"Detected Tweet ID: {tweet_id}")
-        await tweet_queue.put((update, tweet_id, context))
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Tweet added to queue!")
-    else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Please provide a valid Twitter URL.")
+        logger.info(f"🔄 [LOG] Detected Tweet ID: {tweet_id}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🔄 [LOG] Processing Tweet ID: {tweet_id}...")
 
-# ✅ Download Media
-async def download_media(url: str) -> Optional[tuple[BytesIO, str]]:
-    """Downloads media from a URL and returns it as a BytesIO object."""
-    logger.info(f"📥 Downloading media from: {url}")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    content = await response.read()
-                    file_extension = url.split(".")[-1].split("?")[0]
-                    return BytesIO(content), f"media.{file_extension}"
-                logger.error(f"⚠️ Failed to download media. HTTP Status: {response.status}")
-                return None, None
-    except Exception as e:
-        logger.error(f"❌ Error downloading media: {e}")
-        return None, None
+        api = await get_twitter_api()
+        try:
+            tweet = await api.get_tweet(
+                tweet_id, 
+                expansions=["attachments.media_keys"], 
+                media_fields=["url", "type"]
+            )
+        except tweepy.errors.TooManyRequests:
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ [LOG] Twitter API rate limit hit! Try again later.")
+            return
+
+        if tweet and tweet.data:
+            await send_tweet_to_telegram(tweet, context)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ [LOG] Tweet not found!")
+    else:
+        await context.bot.send_message(chat_id=chat_id, text="❌ [LOG] Invalid Twitter URL!")
 
 # ✅ Send Tweet to Telegram
 async def send_tweet_to_telegram(tweet, context: ContextTypes.DEFAULT_TYPE):
-    """Formats and sends the tweet with media as a single post to Telegram."""
-    tweet_text = tweet.text
-    tweet_id = tweet.id
+    """Uploads media and forwards tweet to Telegram."""
+    tweet_text = tweet.data.get("text", "")
+    tweet_id = tweet.data.get("id", "")
     tweet_url = f"https://twitter.com/{twitter_username}/status/{tweet_id}"
     formatted_text = f"{tweet_text}\n\n<a href='{tweet_url}'>View on X</a>"
-    media_list = tweet.get("includes", {}).get("media", [])
-    media_group = []
 
-    if not media_list:  # If no media, send text only
-        await context.bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=formatted_text, parse_mode=ParseMode.HTML)
+    media_urls = extract_media(tweet)
+
+    if not media_urls:
+        await context.bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=formatted_text, parse_mode="HTML")
+    else:
+        await context.bot.send_photo(chat_id=TELEGRAM_CHANNEL_ID, photo=media_urls[0], caption=formatted_text, parse_mode="HTML")
+
+# ✅ Watch Mode: Fetch and Forward Tweets
+async def fetch_and_forward_tweets(context: ContextTypes.DEFAULT_TYPE):
+    """Automatically fetches new tweets and forwards them"""
+    global WATCH_MODE_ENABLED
+    api = await get_twitter_api()
+    if not api:
         return
 
-    for i, media in enumerate(media_list):
-        media_url = media.get("url")
-        media_type = media.get("type")
-        caption_text = formatted_text if i == 0 else None
-        if media_url and media_type:
-            media_content, filename = await download_media(media_url)
-            if media_content:
-                media_content.seek(0)
-                if media_type == "photo":
-                    media_group.append(InputMediaPhoto(media_content, caption=caption_text, parse_mode=ParseMode.HTML))
-                elif media_type in ["video", "animated_gif"]:
-                    media_group.append(InputMediaVideo(media_content, caption=caption_text, parse_mode=ParseMode.HTML))
+    while WATCH_MODE_ENABLED:
+        try:
+            logger.info(f"🔍 Checking for new tweets from @{twitter_username}...")
+            response = await api.get_users_tweets(
+                id=twitter_user_id,
+                tweet_fields=["created_at", "text"],
+                expansions=["attachments.media_keys"],
+                media_fields=["url", "type"],
+                max_results=5
+            )
 
-    if media_group:
-        await context.bot.send_media_group(chat_id=TELEGRAM_CHANNEL_ID, media=media_group)
+            if response and response.data:
+                for tweet in response.data:
+                    if "referenced_tweets" in tweet.data:
+                        logger.info(f"❌ Skipping Tweet ID {tweet.data['id']} (It's a reply)")
+                        continue  # Skip replies
 
-# ✅ Define /start Command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message when the bot starts."""
-    start_message = """
-    📌 Welcome! This bot forwards Tweets from X to a Telegram channel.
+                    logger.info(f"✅ Forwarding Tweet ID {tweet.data['id']} to Telegram...")
+                    await send_tweet_to_telegram(tweet, context)
+                    break  # Stop after first valid tweet
 
-    ➡️ Simply send me a valid tweet URL, and I will forward the text with media to the channel.
+        except tweepy.errors.TooManyRequests:
+            logger.warning("⚠️ Rate limit hit, retrying in 20 minutes...")
+            await asyncio.sleep(POLL_INTERVAL)
 
-    ⚠️ Rate limits from the Twitter API might cause delays.
-    """
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=start_message)
+        await asyncio.sleep(POLL_INTERVAL)
 
-
-# ✅ Toggle Watch Mode
+# ✅ Watch Mode Command
 async def watch_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toggles watch mode and starts/stops the auto-fetching process."""
-    global WATCH_MODE_ENABLED
+    """Toggle watch mode on/off and start the task if enabled"""
+    global WATCH_MODE_ENABLED, watchmode_chat_id
     WATCH_MODE_ENABLED = not WATCH_MODE_ENABLED
-    status = "enabled" if WATCH_MODE_ENABLED else "disabled"
+    watchmode_chat_id = update.effective_chat.id
 
+    status = "enabled ✅" if WATCH_MODE_ENABLED else "disabled ❌"
     logger.info(f"🔄 Watch mode is now {status}")
     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🔄 Watch mode is now {status}.")
-    
+
     if WATCH_MODE_ENABLED:
-        asyncio.create_task(fetch_and_forward_tweets(context))  # ✅ Starts watching for tweets
+        asyncio.create_task(fetch_and_forward_tweets(context))
 
-
-
-# ✅ Start Bot Function
-async def start_bot():
-    """Starts the Telegram bot and initializes handlers."""
-    logger.info("🚀 Bot is starting...")
-
+# ✅ Main Function
+async def main():
+    await initialize_twitter()
     application = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-
-    # ✅ Ensure all handlers are properly added
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("watchmode", watch_mode_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_tweet_url))
-
-    # ✅ Start the bot
     async with application:
-        await application.initialize()
         await application.start()
         await application.updater.start_polling()
-        logger.info("✅ Bot is running!")
-        await asyncio.Event().wait()  # Keeps the bot running
+        await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.run(main())
